@@ -329,9 +329,9 @@ class BFMC_App:
                 
             if self.start_node and self.end_node:
                 self.path = self.map_engine.calc_path_nodes(self.start_node, self.end_node, self.pass_nodes)
-                # Pull ONLY the signs that are on this newly calculated path
-                self.path_signs = self.map_engine.get_path_signs(self.path)
-                self.ui.log_event(f"Path Calculated. {len(self.path_signs)} signs on route.", "SUCCESS")
+                self.ui.log_event(f"Path Calculated: {len(self.path)} nodes.", "SUCCESS")
+                # Auto-calibrate: snap car to start node + align heading to first segment
+                self.calibrate_to_start()
             self.render_map()
 
         elif self.mode == "SIGN":
@@ -823,69 +823,52 @@ class BFMC_App:
             speed=self.current_speed
         )
 
-        # ── KINEMATICS SIMULATION (Map update) ────────────────
-        if abs(self.current_speed) < 1:  self.current_speed = 0
-        if abs(self.current_steer) < 0.5: self.current_steer = 0
-
+        # ── KINEMATICS: IMU accel dead-reckoning, free movement ──
         sim_mult = float(self.ui.slider_sim_speed.get() if not self.headless else 1.0)
-        v_ms = (self.current_speed / 1000.0) * sim_mult * 1.5
-        
-        # --- NEW MAGNETIC PATH SNAP LOGIC ---
-        if self.path and len(self.path) > 1:
-            # Check if this is a fresh start to reset path distance
-            path_tuple = tuple(self.path)
-            if self.last_path_tuple != path_tuple:
-                self.last_path_tuple = path_tuple
-                self.path_distance = 0.0
-                
-            self.path_distance += v_ms * dt
-            # Constrain distance
-            if self.path_distance < 0: self.path_distance = 0
-            
-            # Find the segment currently at `self.path_distance`
-            acc_dist = 0.0
-            found_segment = False
-            for i in range(len(self.path) - 1):
-                n1 = str(self.path[i])
-                n2 = str(self.path[i+1])
-                
-                if n1 not in self.map_engine.G.nodes or n2 not in self.map_engine.G.nodes:
-                    continue
-                    
-                x1, y1 = float(self.map_engine.G.nodes[n1].get('x', 0)), float(self.map_engine.G.nodes[n1].get('y', 0))
-                x2, y2 = float(self.map_engine.G.nodes[n2].get('x', 0)), float(self.map_engine.G.nodes[n2].get('y', 0))
-                
-                seg_len = math.hypot(x2 - x1, y2 - y1)
-                
-                if self.path_distance <= acc_dist + seg_len:
-                    # Car is within this segment
-                    ratio = (self.path_distance - acc_dist) / seg_len if seg_len > 0 else 0
-                    self.car_x = x1 + ratio * (x2 - x1)
-                    self.car_y = y1 + ratio * (y2 - y1)
-                    self.car_yaw = math.atan2(y2 - y1, x2 - x1)
-                    found_segment = True
-                    self.visited_path_nodes.add(n1)
-                    break
-                    
-                acc_dist += seg_len
-            
-            if not found_segment:
-                # Car has reached the end of the path
-                n_end = str(self.path[-1])
-                if n_end in self.map_engine.G.nodes:
-                    self.car_x = float(self.map_engine.G.nodes[n_end].get('x', 0))
-                    self.car_y = float(self.map_engine.G.nodes[n_end].get('y', 0))
-                self.current_speed = 0.0 # Force stop at end of path
+
+        # Heading: path-aligned at calibration + IMU delta since then.
+        # No path locking — the car can move anywhere.
+        imu_now_deg  = self.imu.get_yaw()
+        calib_imu    = getattr(self, '_calib_imu_yaw',  imu_now_deg)
+        calib_path   = getattr(self, '_calib_path_yaw', math.radians(imu_now_deg))
+        self.car_yaw = calib_path + math.radians(imu_now_deg - calib_imu)
+
+        # Velocity from IMU forward acceleration (accel_x = car forward axis).
+        # When hardware is absent fall back to commanded speed so the
+        # map dot still moves during desktop-only testing.
+        if self.imu.has_hardware:
+            accel_fwd = self.imu.get_accel_x()
+            if abs(accel_fwd) < 0.08:        # deadzone — kill sensor noise at rest
+                accel_fwd = 0.0
+            self.car_speed_ms += accel_fwd * dt
+            self.car_speed_ms *= max(0.0, 1.0 - 2.0 * dt)   # rolling drag (~0.90 @ 20 Hz)
+            self.car_speed_ms  = float(np.clip(self.car_speed_ms, -5.0, 5.0))
         else:
-            # Fallback unconstrained kinematics if no map path is active
-            steer_rad = math.radians(self.current_steer)
-            self.car_yaw -= (v_ms / max(WHEELBASE_M, 0.01)) * math.tan(steer_rad) * dt
-            self.car_yaw  = (self.car_yaw + math.pi) % (2 * math.pi) - math.pi
-            self.car_x   += v_ms * math.cos(self.car_yaw) * dt
-            self.car_y   += v_ms * math.sin(self.car_yaw) * dt
-            self.path_distance = 0.0
-            self.last_path_tuple = None
-        # ------------------------------------------------------
+            self.car_speed_ms = self.current_speed / 1000.0
+
+        v_ms = self.car_speed_ms * sim_mult
+
+        # Integrate position — unconstrained, car can move off the planned path
+        self.car_x += v_ms * math.cos(self.car_yaw) * dt
+        self.car_y += v_ms * math.sin(self.car_yaw) * dt
+
+        # Mark planned-path nodes as visited when car passes within 0.5 m
+        if self.path:
+            for n in self.path:
+                nd = self.map_engine.G.nodes.get(str(n))
+                if nd and math.hypot(self.car_x - float(nd.get('x', 0)),
+                                     self.car_y - float(nd.get('y', 0))) < 0.5:
+                    self.visited_path_nodes.add(str(n))
+
+        # Dynamic sign list: signs ahead of car in its forward direction.
+        # Status is preserved across frames so PENDING→ACTING→COMPLETED
+        # tracking survives even as the list refreshes every tick.
+        _fwd_signs   = self.map_engine.get_forward_signs(self.car_x, self.car_y, self.car_yaw)
+        _prev_status = {str(s['node']): s.get('status', '⏳ PENDING') for s in self.path_signs}
+        for s in _fwd_signs:
+            s['status'] = _prev_status.get(str(s['node']), '⏳ PENDING')
+        self.path_signs = _fwd_signs
+        # ─────────────────────────────────────────────────────────
 
         # ── TELEMETRY LOG (rate-limited to 1 Hz, non-blocking) ──
         yolo_labels_str = ", ".join(ai_labels) if ai_labels else ""
