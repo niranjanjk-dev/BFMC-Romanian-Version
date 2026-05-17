@@ -60,21 +60,21 @@ class DashboardUI:
         
         # --- LEFT PANEL (Cameras) ---
         left_panes = ttk.PanedWindow(main_panes, orient=tk.VERTICAL)
-        main_panes.add(left_panes, weight=1)
-        
-        cam_frm = tk.LabelFrame(left_panes, text="Raw Camera (YOLO ADAS)", bg=THEME["panel"], fg="white", font=THEME["font_h"])
-        self.cam_label = tk.Label(cam_frm, bg="black")
-        self.cam_label.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        placeholder = Image.new('RGB', (440, 330), color='black')
+        main_panes.add(left_panes, weight=2)
+
+        self.cam_frm = tk.LabelFrame(left_panes, text="Raw Camera (YOLO ADAS)", bg=THEME["panel"], fg="white", font=THEME["font_h"])
+        self.cam_label = tk.Label(self.cam_frm, bg="black")
+        self.cam_label.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        placeholder = Image.new('RGB', (320, 240), color='black')
         self._ph_img = ImageTk.PhotoImage(placeholder)
         self.cam_label.configure(image=self._ph_img)
-        left_panes.add(cam_frm, weight=1)
+        left_panes.add(self.cam_frm, weight=1)
 
-        bev_frm = tk.LabelFrame(left_panes, text="Bird's Eye View (VIZ-06)", bg=THEME["panel"], fg="white", font=THEME["font_h"])
-        self.bev_label = tk.Label(bev_frm, bg="black")
-        self.bev_label.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.bev_frm = tk.LabelFrame(left_panes, text="Bird's Eye View (VIZ-06)", bg=THEME["panel"], fg="white", font=THEME["font_h"])
+        self.bev_label = tk.Label(self.bev_frm, bg="black")
+        self.bev_label.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         self.bev_label.configure(image=self._ph_img)
-        left_panes.add(bev_frm, weight=1)
+        left_panes.add(self.bev_frm, weight=1)
         
         # --- MIDDLE PANEL (Controls & Tuning) ---
         mid_col_panes = ttk.PanedWindow(main_panes, orient=tk.VERTICAL)

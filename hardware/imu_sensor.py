@@ -75,5 +75,14 @@ class IMUSensor(threading.Thread):
     def get_pitch(self):
         return getattr(self, 'pitch', 0.0)
 
+    def get_accel_x(self):
+        return SHARED_STATE.get("imu_accel_x", 0.0)
+
+    def get_accel_y(self):
+        return SHARED_STATE.get("imu_accel_y", 0.0)
+
+    def get_accel_z(self):
+        return SHARED_STATE.get("imu_accel_z", 0.0)
+
     def get_has_hardware(self):
         return self.has_hardware

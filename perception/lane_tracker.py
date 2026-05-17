@@ -217,27 +217,38 @@ class HybridLaneTracker:
     def _sliding_window(self, warped, nzx, nzy, map_hint: str = "STRAIGHT"):
         dbg  = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
         hist = np.sum(warped[self.h // 2:, :], axis=0)
-        mid, margin = int(self.w * 0.40), self.SW_MARGIN
+        mid, margin = self.w // 2, self.SW_MARGIN   # symmetric centre = 320
 
         shift = 0
-        if map_hint == "LEFT":  shift = -80
-        elif map_hint == "RIGHT": shift = 80
+        if map_hint == "LEFT":  shift = -60
+        elif map_hint == "RIGHT": shift = 60
 
-        l_lo =  max(margin, margin + shift)
-        l_hi =  max(l_lo + 1, mid - margin + shift)
-        r_lo =  max(margin, mid + margin + shift)
-        r_hi =  min(self.w - margin, self.w - margin)   
+        # Symmetric left / right search zones with a dead-band at centre
+        l_lo = max(margin, shift)
+        l_hi = max(l_lo + 1, mid - margin + shift)
+        r_lo = min(self.w - margin, mid + margin + shift)
+        r_hi = self.w - margin
 
         lb = int(np.argmax(hist[l_lo:l_hi])) + l_lo if l_hi > l_lo else margin
-        rb = int(np.argmax(hist[r_lo:r_hi])) + r_lo if r_hi > r_lo else mid + margin
+        rb = int(np.argmax(hist[r_lo:r_hi])) + r_lo if r_hi > r_lo else self.w - margin
 
-        if abs(rb - lb) < 100:
-            smoothed = np.convolve(hist.astype(float), np.ones(20) / 20, mode='same')
-            p1 = int(np.argmax(smoothed))
-            tmp = smoothed.copy()
-            tmp[max(0, p1-40):min(self.w, p1+40)] = 0
-            p2 = int(np.argmax(tmp))
-            lb, rb = (min(p1, p2), max(p1, p2))
+        l_val = int(hist[lb]) if 0 <= lb < self.w else 0
+        r_val = int(hist[rb]) if 0 <= rb < self.w else 0
+
+        # Ghost-position the weak tracker from the strong one so they never
+        # compete for the same line.
+        GHOST_MIN = 80
+        if l_val >= GHOST_MIN and r_val < GHOST_MIN:
+            rb = int(np.clip(lb + self.estimated_lane_width, r_lo, self.w - margin))
+        elif r_val >= GHOST_MIN and l_val < GHOST_MIN:
+            lb = int(np.clip(rb - self.estimated_lane_width, margin, l_hi - 1))
+
+        # Hard minimum separation before we start tracking windows
+        MIN_SEP = max(2 * self.SW_MARGIN + 20, int(self.estimated_lane_width * 0.45))
+        if rb - lb < MIN_SEP:
+            centre = (lb + rb) // 2
+            lb = centre - MIN_SEP // 2
+            rb = centre + MIN_SEP // 2
 
         wh = self.h // self.NWINDOWS
         lx, rx = lb, rb
@@ -245,20 +256,35 @@ class HybridLaneTracker:
 
         for win in range(self.NWINDOWS):
             y_lo, y_hi = self.h - (win + 1) * wh, self.h - win * wh
-            xl0, xl1 = max(0, lx - self.SW_MARGIN), min(self.w, lx + self.SW_MARGIN)
-            xr0, xr1 = max(0, rx - self.SW_MARGIN), min(self.w, rx + self.SW_MARGIN)
+            xl0 = max(0,        lx - self.SW_MARGIN)
+            xl1 = min(self.w,   lx + self.SW_MARGIN)
+            xr0 = max(0,        rx - self.SW_MARGIN)
+            xr1 = min(self.w,   rx + self.SW_MARGIN)
+
+            # Hard wall: left box right-edge must stay left of right box left-edge
+            if xl1 > xr0:
+                gap  = (xl1 - xr0) // 2 + 1
+                xl1  = max(xl0, xl1 - gap)
+                xr0  = min(xr1, xr0 + gap)
 
             cv2.rectangle(dbg, (xl0, y_lo), (xl1, y_hi), (0, 255, 0), 2)
             cv2.rectangle(dbg, (xr0, y_lo), (xr1, y_hi), (0, 255, 0), 2)
 
-            gl = ((nzy >= y_lo) & (nzy < y_hi) & (nzx >= xl0)  & (nzx < xl1)).nonzero()[0]
-            gr = ((nzy >= y_lo) & (nzy < y_hi) & (nzx >= xr0)  & (nzx < xr1)).nonzero()[0]
+            gl = ((nzy >= y_lo) & (nzy < y_hi) & (nzx >= xl0) & (nzx < xl1)).nonzero()[0]
+            gr = ((nzy >= y_lo) & (nzy < y_hi) & (nzx >= xr0) & (nzx < xr1)).nonzero()[0]
             li.append(gl); ri.append(gr)
 
-            if len(gl) > self.MINPIX: lx = int(np.mean(nzx[gl]))
-            if len(gr) > self.MINPIX: rx = int(np.mean(nzx[gr]))
+            new_lx = int(np.mean(nzx[gl])) if len(gl) > self.MINPIX else lx
+            new_rx = int(np.mean(nzx[gr])) if len(gr) > self.MINPIX else rx
 
-        li, ri = np.concatenate(li) if len(li) else np.array([]), np.concatenate(ri) if len(ri) else np.array([])
+            # Keep centres separated after every window update
+            if new_rx - new_lx < MIN_SEP:
+                new_lx = min(new_lx, new_rx - MIN_SEP)
+                new_rx = max(new_rx, new_lx + MIN_SEP)
+            lx, rx = new_lx, new_rx
+
+        li = np.concatenate(li) if len(li) else np.array([])
+        ri = np.concatenate(ri) if len(ri) else np.array([])
         if len(li): dbg[nzy[li], nzx[li]] = [255, 80, 80]
         if len(ri): dbg[nzy[ri], nzx[ri]] = [80,  80, 255]
         return li, ri, dbg
@@ -271,9 +297,36 @@ class HybridLaneTracker:
         li = band(self.sl) if self.sl is not None else np.array([], dtype=int)
         ri = band(self.sr) if self.sr is not None else np.array([], dtype=int)
 
-        if len(li) < self.MIN_PIX_OK or len(ri) < self.MIN_PIX_OK:
+        # Ghost band: when one fit has expired, synthesise a search zone at
+        # ±lane_width from the surviving fit so the missing line re-acquires
+        # without ever dropping to the sliding window.
+        if self.sl is None and self.sr is not None and len(ri) >= self.MIN_PIX_OK:
+            ghost_lf    = self.sr.copy()
+            ghost_lf[2] -= self.estimated_lane_width
+            li = ((nzx > np.polyval(ghost_lf, nzy) - m) &
+                  (nzx < np.polyval(ghost_lf, nzy) + m)).nonzero()[0]
+        elif self.sr is None and self.sl is not None and len(li) >= self.MIN_PIX_OK:
+            ghost_rf    = self.sl.copy()
+            ghost_rf[2] += self.estimated_lane_width
+            ri = ((nzx > np.polyval(ghost_rf, nzy) - m) &
+                  (nzx < np.polyval(ghost_rf, nzy) + m)).nonzero()[0]
+
+        # Only fall back to sliding window when BOTH lines are absent simultaneously
+        if len(li) < self.MIN_PIX_OK and len(ri) < self.MIN_PIX_OK:
             self.mode = "SEARCH"
             return self._sliding_window(warped, nzx, nzy, map_hint=map_hint)
+
+        # Collision guard: if the two band centroids are too close, one tracker
+        # has drifted onto the other's line — drop the weaker band.
+        MIN_SEP = max(120, int(self.estimated_lane_width * 0.40))
+        if len(li) > 0 and len(ri) > 0:
+            li_cx = float(np.mean(nzx[li]))
+            ri_cx = float(np.mean(nzx[ri]))
+            if ri_cx - li_cx < MIN_SEP:
+                if len(li) < len(ri):
+                    li = np.array([], dtype=int)
+                else:
+                    ri = np.array([], dtype=int)
 
         if len(li): dbg[nzy[li], nzx[li]] = [255, 80, 80]
         if len(ri): dbg[nzy[ri], nzx[ri]] = [80,  80, 255]

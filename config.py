@@ -90,20 +90,51 @@ CAMERA_BUFFER_FRAMES    = 2            # Frame queue depth (reduces latency)
 #    DST centre     (x=320)  → expected lane centre  ← Stanley zero-error point
 #    DST right edge (x=490)  → estimated right boundary
 # ─────────────────────────────────────────────────────────────────────────────
+#
+#  HOW TO TUNE THE BIRD'S-EYE VIEW (BEV)
+#  ──────────────────────────────────────
+#  The 4 SRC points define a trapezoid in the RAW camera frame (640×480).
+#  The 4 DST points define where those 4 corners land in the BEV output (also 640×480).
+#
+#  SRC SHAPE RULES:
+#    • Bottom row (high y) = road close to the car  → should be WIDE
+#    • Top row   (low  y) = road far from the car   → should be NARROW
+#      (matches the perspective convergence you see in the camera image)
+#    • Left/right edges should sit just OUTSIDE the lane markings
+#
+#  TO ZOOM OUT  → widen SRC (increase x-spread at bottom, decrease top y value)
+#  TO ZOOM IN   → narrow SRC (reduce x-spread or raise top y value)
+#  TO SHIFT LEFT  → move both SRC left columns left
+#  TO SHIFT RIGHT → move both SRC right columns right
+#
+#  DST is always the full output rectangle [[0,0],[640,0],[0,480],[640,480]]
+#  unless you want black borders on the sides (then shrink DST x-range).
+#
+#  WORKFLOW:
+#    1. Pause the car / use a still frame.
+#    2. Print pixel coords of the two lane lines at y=top_row and y=bottom_row
+#       (use cv2.imshow + mouse callback, or mark points in Paint).
+#    3. Set SRC top-left  = (left_line_x_at_top  - margin, top_row)
+#              top-right = (right_line_x_at_top  + margin, top_row)
+#              bot-left  = (left_line_x_at_bot   - margin, bottom_row)
+#              bot-right = (right_line_x_at_bot  + margin, bottom_row)
+#    4. Restart and inspect the BEV — the lane lines should appear nearly vertical.
+#
 LANE_SRC_PTS = [
-    [ 80, 290],   # top-left  — original frame (px)
-    [280, 290],   # top-right
-    [  0, 430],   # bottom-left
-    [200, 430],   # bottom-right
+    [200, 260],   # top-left  — reference-validated: left line near vanishing (y=260 stays on road)
+    [440, 260],   # top-right — reference-validated: right line near vanishing
+    [ 40, 450],   # bottom-left  — reference-validated: left line at near field
+    [600, 450],   # bottom-right — reference-validated: right line at near field
 ]
 LANE_DST_PTS = [
-    [150,   0],   # top-left  — bird's-eye output (px)
+    [150,   0],   # top-left  — lane centered in BEV (not full-width, matches reference)
     [490,   0],   # top-right
     [150, 480],   # bottom-left
     [490, 480],   # bottom-right
 ]
 # Slice [y0:y1, x0:x1] to zero-out camera-mount hardware in the warped image
-LANE_CLIP_MASK_WARPED   = (slice(360, 480), slice(280, 460))
+# Lane lines appear at BEV x≈150 (left) and x≈490 (right) — this mask only covers center
+LANE_CLIP_MASK_WARPED   = (slice(440, 480), slice(290, 400))
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  LANE DETECTION — Binary Thresholding

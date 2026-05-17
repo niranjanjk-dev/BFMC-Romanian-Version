@@ -20,7 +20,6 @@ from dashboard.map_engine import MapEngine
 from dashboard.adas_vision_utils import annotate_bev, JunctionDetector, RoundaboutNavigator
 from core.telemetry import TelemetryLogger
 
-<<<<<<< HEAD
 try:
     from parking.parking import ParkingSystem
 except ImportError:
@@ -31,9 +30,6 @@ try:
     _WEB_AVAILABLE = True
 except ImportError:
     _WEB_AVAILABLE = False
-=======
->>>>>>> 16748763df8572ca26791d31ea23899094327c68
-
 try:
     from hardware.serial_handler import STM32_SerialHandler
 except ImportError:
@@ -144,8 +140,16 @@ class BFMC_App:
         if not args.no_v2x:
             self.v2x_client.start()
 
-        # Physics State
-        self.car_x, self.car_y, self.car_yaw = 0.5, 0.5, 0.0
+        # Physics State — place car at first graph node so it starts on the map
+        if self.map_engine.G.nodes:
+            _n0 = next(iter(self.map_engine.G.nodes))
+            _d0 = self.map_engine.G.nodes[_n0]
+            self.car_x = float(_d0.get('x', 4.17))
+            self.car_y = float(_d0.get('y', 6.89))
+        else:
+            self.car_x, self.car_y = 4.17, 6.89
+        self.car_yaw = 0.0
+        self.car_speed_ms = 0.0          # velocity integrated from IMU accel (m/s)
         self.current_speed, self.current_steer = 0.0, 0.0
         self.keys = {'Up': False, 'Down': False, 'Left': False, 'Right': False}
         self.last_ctrl_time = time.time()
@@ -493,6 +497,7 @@ class BFMC_App:
         t_res = None
         behav_out = None
         active_sign_cmd = None
+        ai_labels = []
 
         if frame is not None and self.detector and self.controller:
             # 2. Process Lane Detection
@@ -677,57 +682,64 @@ class BFMC_App:
                     self.is_calibrating = True
                     target_speed, target_steer = 0.0, 0.0
                     
-            # 6. Dashboard CAM + BEV Render
-            if not self.headless:
-                final_cam = t_res.yolo_debug_frame if (t_res and getattr(t_res, 'yolo_debug_frame', None) is not None) else frame
-                final_cam = cv2.cvtColor(final_cam, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(final_cam).resize((440, 330))
-                self.ui.cam_label.imgtk = ImageTk.PhotoImage(image=img)
-                self.ui.cam_label.configure(image=self.ui.cam_label.imgtk)
 
-                if hasattr(lane_result, 'lane_dbg'):
-                    dbg = lane_result.lane_dbg.copy()
+        # ── CAMERA FEED (always render when frame available) ──────
+        if not self.headless and frame is not None:
+            final_cam = (t_res.yolo_debug_frame
+                         if (t_res and getattr(t_res, 'yolo_debug_frame', None) is not None)
+                         else frame)
+            final_cam_rgb = cv2.cvtColor(final_cam, cv2.COLOR_BGR2RGB)
+            _cw = self.ui.cam_label.winfo_width()
+            _ch = self.ui.cam_label.winfo_height()
+            if _cw <= 10 or _ch <= 10:
+                _cw, _ch = 320, 240
+            img = Image.fromarray(final_cam_rgb).resize((_cw, _ch))
+            self.ui.cam_label.imgtk = ImageTk.PhotoImage(image=img)
+            self.ui.cam_label.configure(image=self.ui.cam_label.imgtk)
 
-                    cv2.putText(dbg, lane_result.anchor, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                    cv2.putText(dbg, f"Target X: {lane_result.target_x:.1f}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                    cv2.putText(dbg, f"Lat Error: {lane_result.lateral_error_px:+.1f}px", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
-                    
-                    steer_color = (100,255,100) if abs(self.current_steer)<15 else (100,100,255)
-                    cv2.putText(dbg, f"STEER: {self.current_steer:+.1f} deg", (420, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, steer_color, 2)
-                    cv2.putText(dbg, f"SPEED: {self.current_speed:.0f} PWM", (420, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 100), 2)
-                    
-                    if t_res is not None and behav_out is not None:
-                        cv2.putText(dbg, f"STATE: {behav_out.state}", (420, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
-                        cv2.putText(dbg, f"ZONE: {behav_out.zone_mode}", (420, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 100, 255), 2)
-                        y_offset = 120
-                        if ai_labels:
-                            cv2.putText(dbg, "YOLO Detections:", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                            for label in ai_labels:
-                                cv2.putText(dbg, f"- {label}", (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
-                                y_offset += 20
-
-                    bev = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
-                    img_bev = Image.fromarray(bev).resize((440, 330))
-                    self.ui.bev_label.imgtk = ImageTk.PhotoImage(image=img_bev)
-                    self.ui.bev_label.configure(image=self.ui.bev_label.imgtk)
+        # ── BEV (render when lane detection has a result) ─────────
+        if not self.headless and lane_result is not None and hasattr(lane_result, 'lane_dbg') and lane_result.lane_dbg is not None:
+            dbg = lane_result.lane_dbg.copy()
+            cv2.putText(dbg, lane_result.anchor, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            cv2.putText(dbg, f"Target X: {lane_result.target_x:.1f}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            cv2.putText(dbg, f"Lat Error: {lane_result.lateral_error_px:+.1f}px", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+            steer_color = (100, 255, 100) if abs(self.current_steer) < 15 else (100, 100, 255)
+            cv2.putText(dbg, f"STEER: {self.current_steer:+.1f} deg", (420, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, steer_color, 2)
+            cv2.putText(dbg, f"SPEED: {self.current_speed:.0f} PWM", (420, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 100), 2)
+            if t_res is not None and behav_out is not None:
+                cv2.putText(dbg, f"STATE: {behav_out.state}", (420, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                cv2.putText(dbg, f"ZONE: {behav_out.zone_mode}", (420, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 100, 255), 2)
+                y_offset = 120
+                if ai_labels:
+                    cv2.putText(dbg, "YOLO:", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    for label in ai_labels:
+                        cv2.putText(dbg, f"- {label}", (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
+                        y_offset += 20
+            bev_rgb = cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB)
+            _bw = self.ui.bev_label.winfo_width()
+            _bh = self.ui.bev_label.winfo_height()
+            if _bw <= 10 or _bh <= 10:
+                _bw, _bh = 320, 240
+            img_bev = Image.fromarray(bev_rgb).resize((_bw, _bh))
+            self.ui.bev_label.imgtk = ImageTk.PhotoImage(image=img_bev)
+            self.ui.bev_label.configure(image=self.ui.bev_label.imgtk)
 
         # ── PARKING PLAYBACK OVERRIDE ─────────────────────────
         if self.is_playing_back:
             self.is_calibrating = False
-            
+
             # If no current command is loaded or its duration is over, grab the next
             if self.playback_cmd is None or self.playback_frames <= 0:
                 if self.playback_queue:
-                    # Only pop if no pedestrian is detected (Pause trajectory execution)
-                    if not any(label.lower() in ["pedestrian", "person"] for label in (ai_labels if 'ai_labels' in locals() else [])):
+                    if not any(label.lower() in ["pedestrian", "person"] for label in ai_labels):
                         self.playback_cmd = self.playback_queue.pop(0)
                         self.playback_frames = self.playback_cmd.get("duration_fr", 1)
                 else:
                     self.playback_cmd = None
-            
+
             if self.playback_cmd:
                 # Only decrement frames if no pedestrian
-                is_pedestrian = any(label.lower() in ["pedestrian", "person"] for label in (ai_labels if 'ai_labels' in locals() else []))
+                is_pedestrian = any(label.lower() in ["pedestrian", "person"] for label in ai_labels)
                 if not is_pedestrian:
                     self.playback_frames -= 1
                     
@@ -876,7 +888,7 @@ class BFMC_App:
         # ------------------------------------------------------
 
         # ── TELEMETRY LOG (rate-limited to 1 Hz, non-blocking) ──
-        yolo_labels_str = ", ".join(ai_labels) if 'ai_labels' in dir() and ai_labels else ""
+        yolo_labels_str = ", ".join(ai_labels) if ai_labels else ""
         self.telemetry.log(
             loop_hz     = f"{1.0/dt:.1f}" if dt > 0 else "0",
             mode        = "AUTO" if self.is_auto_mode else "MANUAL",

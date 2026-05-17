@@ -119,6 +119,31 @@ class MapEngine:
                     
         return path_signs
 
+    def get_forward_signs(self, car_x, car_y, car_yaw, look_ahead_m=15.0):
+        """Returns signs within look_ahead_m that are in the car's forward half-plane, sorted by distance."""
+        fwd_cos = math.cos(car_yaw)
+        fwd_sin = math.sin(car_yaw)
+        result = []
+        for s in self.signs:
+            nd = self.G.nodes.get(str(s['node']))
+            if nd is None:
+                continue
+            dx = float(nd.get('x', 0)) - car_x
+            dy = float(nd.get('y', 0)) - car_y
+            dist = math.hypot(dx, dy)
+            if dist > look_ahead_m:
+                continue
+            if dist > 0.1:
+                dot = (dx / dist) * fwd_cos + (dy / dist) * fwd_sin
+                if dot < 0.1:   # outside ±84° forward cone
+                    continue
+            ps = s.copy()
+            ps['distance'] = dist
+            ps['status'] = '⏳ PENDING'
+            result.append(ps)
+        result.sort(key=lambda x: x['distance'])
+        return result
+
     def update_sign_statuses(self, path_signs, ai_detections, ai_distance, detect_dist=5.0, act_dist=2.0, light_status="NONE", active_blocks=None):
         """
         Updates the status of signs on the route based entirely on AI vision distance.

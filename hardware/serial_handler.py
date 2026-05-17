@@ -250,6 +250,10 @@ class STM32_SerialHandler:
                         SHARED_STATE["imu_pitch"] = pitch
                         SHARED_STATE["imu_calibrated"] = True
                         SHARED_STATE["last_imu_time"] = time.time()
+                        if len(vals) >= 6:
+                            SHARED_STATE["imu_accel_x"] = float(vals[3])
+                            SHARED_STATE["imu_accel_y"] = float(vals[4])
+                            SHARED_STATE["imu_accel_z"] = float(vals[5])
                 else:
                     # Print unexpected or other telemetry for debugging
                     pass
